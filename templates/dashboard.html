@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard - Analyse de Taux</title>
+    
+    <!-- Tailwind CSS (utilisé pour le design principal) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Bootstrap CSS (Optionnel, désactivé pour éviter les conflits avec Tailwind. Activez si vous avez besoin des styles Bootstrap) -->
+    <!-- <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"> -->
+    
+    <!-- Font Awesome (pour les icônes) -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+    
+    <!-- Google Fonts: Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <style>
+        /* Style personnalisé pour compléter Tailwind et ressembler à l'image */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f8f9fc; /* Arrière-plan gris clair */
+        }
+
+        #sidebar {
+            width: 250px;
+            min-height: 100vh;
+            transition: margin-left 0.3s ease-in-out;
+        }
+
+        #sidebar.collapsed {
+            margin-left: -250px;
+        }
+        
+        /* Style des cartes KPI */
+        .kpi-card {
+            border-left-width: 4px;
+            transition: all 0.2s ease-in-out;
+        }
+        .kpi-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.1);
+        }
+        .border-left-primary { border-color: #4e73df; }
+        .border-left-success { border-color: #1cc88a; }
+        .border-left-warning { border-color: #f6c23e; }
+
+        /* Style des en-têtes de carte */
+        .card-header-custom {
+            background-color: #f8f9fc;
+            border-bottom: 1px solid #e3e6f0;
+        }
+        
+        /* Style pour les tables générées par Pandas */
+        .table {
+            width: 100%;
+            margin-bottom: 1rem;
+            color: #5a5c69;
+            border-collapse: collapse;
+        }
+        .table th, .table td {
+            padding: 0.75rem;
+            vertical-align: top;
+            border-top: 1px solid #e3e6f0;
+        }
+        .table thead th {
+            vertical-align: bottom;
+            border-bottom: 2px solid #e3e6f0;
+            background-color: #f8f9fc;
+        }
+        .table tbody tr:nth-of-type(odd) {
+            background-color: rgba(0, 0, 0, 0.02);
+        }
+        .table tbody tr:hover {
+            background-color: #e9ecef;
+        }
+    </style>
+</head>
+<body class="flex">
+
+    <!-- Sidebar -->
+    <aside id="sidebar" class="bg-gray-900 text-white flex-shrink-0">
+        <div class="p-4 text-2xl font-bold border-b border-gray-700">
+            <a href="/"><i class="fas fa-chart-line text-blue-400"></i> SB Finance</a>
+        </div>
+        <nav class="mt-4">
+            <h3 class="px-4 py-2 text-xs uppercase text-gray-400 font-bold">Actions</h3>
+            <!-- Formulaire d'importation -->
+            <div class="px-4 py-2">
+                <form action="{{ url_for('index') }}" method="post" enctype="multipart/form-data">
+                    <input type="hidden" name="action" value="calculate_curves">
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-300 mb-1">Source BAM</label>
+                        <input type="date" name="date_bam" class="w-full bg-gray-700 border border-gray-600 rounded-md p-2 text-sm focus:ring-blue-500 focus:border-blue-500" value="{{ last_date }}">
+                        <button type="submit" name="mode" value="bam" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md mt-2 text-sm transition">
+                            <i class="fas fa-download mr-2"></i>Charger
+                        </button>
+                    </div>
+                    <div>
+                        <label for="csv" class="block text-sm font-medium text-gray-300 mb-1">Fichier CSV</label>
+                        <input class="w-full text-sm text-gray-300 bg-gray-700 border border-gray-600 rounded-md cursor-pointer file:bg-gray-600 file:border-0 file:text-white file:font-bold file:py-2 file:px-4" type="file" name="csv" id="csvFile">
+                        <button type="submit" name="mode" value="upload" class="w-full bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-md mt-2 text-sm transition">
+                            <i class="fas fa-upload mr-2"></i>Uploader
+                        </button>
+                    </div>
+                </form>
+            </div>
+            
+            <h3 class="px-4 py-2 mt-4 text-xs uppercase text-gray-400 font-bold">Navigation</h3>
+            <a href="#courbes-section" class="block px-4 py-2 text-gray-300 hover:bg-gray-700 hover:text-white rounded-md mx-2 transition">
+                <i class="fas fa-bezier-curve fa-fw mr-3"></i>Courbes de Taux
+            </a>
+            <a href="#forwards-section" class="block px-4 py-2 text-gray-300 hover:bg-gray-700 hover:text-white rounded-md mx-2 transition">
+                <i class="fas fa-chart-area fa-fw mr-3"></i>Taux Forwards
+            </a>
+            <a href="#interpolation-section" class="block px-4 py-2 text-gray-300 hover:bg-gray-700 hover:text-white rounded-md mx-2 transition">
+                <i class="fas fa-chart-pie fa-fw mr-3"></i>Interpolation
+            </a>
+        </nav>
+    </aside>
+
+    <!-- Main Content -->
+    <div class="flex-1 flex flex-col">
+        <!-- Header -->
+        <header class="bg-white shadow-sm p-4 flex justify-between items-center">
+            <button id="menu-toggle" class="text-gray-600 hover:text-gray-900 focus:outline-none">
+                <i class="fas fa-bars text-xl"></i>
+            </button>
+            <form action="{{ url_for('index') }}" method="post">
+                <input type="hidden" name="action" value="reset">
+                <button type="submit" class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded-md text-sm transition">
+                    <i class="fas fa-power-off mr-2"></i>Réinitialiser
+                </button>
+            </form>
+        </header>
+
+        <!-- Page Content -->
+        <main class="flex-1 p-6 overflow-y-auto">
+            <h1 class="text-3xl font-bold text-gray-800 mb-6">Dashboard</h1>
+
+            {% if error %}
+            <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md relative mb-6" role="alert">
+                <strong class="font-bold">Erreur : </strong>
+                <span class="block sm:inline">{{ error }}</span>
+            </div>
+            {% endif %}
+
+            {% if has_data %}
+            <!-- Cartes KPI -->
+            <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6 mb-6">
+                <div class="kpi-card bg-white rounded-lg shadow p-4 border-left-primary">
+                    <div class="flex items-center">
+                        <div class="flex-1">
+                            <div class="text-xs font-bold text-blue-600 uppercase mb-1">Échéances</div>
+                            <div class="text-2xl font-bold text-gray-800">{{ kpi_stats.nb_echeances }}</div>
+                        </div>
+                        <div class="text-gray-300"><i class="fas fa-calendar fa-3x"></i></div>
+                    </div>
+                </div>
+                <div class="kpi-card bg-white rounded-lg shadow p-4 border-left-success">
+                    <div class="flex items-center">
+                        <div class="flex-1">
+                            <div class="text-xs font-bold text-green-600 uppercase mb-1">Maturité Max</div>
+                            <div class="text-2xl font-bold text-gray-800">{{ kpi_stats.maturite_max }}</div>
+                        </div>
+                        <div class="text-gray-300"><i class="fas fa-clock fa-3x"></i></div>
+                    </div>
+                </div>
+                <div class="kpi-card bg-white rounded-lg shadow p-4 border-left-warning">
+                     <div class="flex items-center">
+                        <div class="flex-1">
+                            <div class="text-xs font-bold text-yellow-600 uppercase mb-1">Taux ZC Max</div>
+                            <div class="text-2xl font-bold text-gray-800">{{ kpi_stats.taux_zc_max }}</div>
+                        </div>
+                        <div class="text-gray-300"><i class="fas fa-arrow-up-right-dots fa-3x"></i></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Section des Courbes -->
+            <div id="courbes-section" class="bg-white rounded-lg shadow mb-6">
+                <div class="card-header-custom p-4 rounded-t-lg">
+                    <h6 class="text-lg font-bold text-blue-600">Courbes de Taux (Actuariel & Zéro-Coupon)</h6>
+                </div>
+                <div class="p-4">
+                    <!-- Remplacé par un canvas pour Chart.js -->
+                    <canvas id="yieldCurveChart"></canvas>
+                    <hr class="my-4">
+                    <h6 class="text-md font-semibold text-gray-700 mb-2">Données de calcul</h6>
+                    <div class="overflow-x-auto">
+                        {% if df_table %}{{ df_table|safe }}{% else %}<p class="text-gray-500">Aucune donnée.</p>{% endif %}
+                    </div>
+                </div>
+            </div>
+
+            <!-- Section Forwards -->
+            <div id="forwards-section" class="bg-white rounded-lg shadow mb-6">
+                <div class="card-header-custom p-4 flex justify-between items-center rounded-t-lg">
+                    <h6 class="text-lg font-bold text-blue-600">Calcul des Taux Forwards</h6>
+                    <form action="{{ url_for('index') }}" method="post">
+                        <input type="hidden" name="action" value="calculate_forwards">
+                        <button type="submit" class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-md text-sm transition">Calculer</button>
+                    </form>
+                </div>
+                <div class="p-4">
+                    <!-- Remplacé par un canvas pour Chart.js -->
+                    <canvas id="forwardCurveChart"></canvas>
+                    {% if df_fw_table %}
+                        <hr class="my-4">
+                        <h6 class="text-md font-semibold text-gray-700 mb-2">Détails des Taux Forwards</h6>
+                        <div class="overflow-x-auto">{{ df_fw_table|safe }}</div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Section Interpolation -->
+            <div id="interpolation-section" class="bg-white rounded-lg shadow mb-6">
+                <div class="card-header-custom p-4 rounded-t-lg">
+                    <h6 class="text-lg font-bold text-blue-600">Interpolation de Taux Zéro-Coupon</h6>
+                </div>
+                <div class="p-4">
+                     <form action="{{ url_for('index') }}" method="post" class="flex items-end gap-4">
+                        <input type="hidden" name="action" value="interpolate_date">
+                        <div class="flex-1">
+                            <label for="target_date" class="block text-sm font-medium text-gray-700">Date à interpoler</label>
+                            <input type="date" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50" id="target_date" name="target_date" required>
+                        </div>
+                        <button type="submit" class="bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-2 px-4 rounded-md text-sm transition">Interpoler</button>
+                    </form>
+                    {% if interpolated_rate %}
+                    <div class="bg-indigo-100 border-l-4 border-indigo-500 text-indigo-700 p-4 mt-6 rounded-md" role="alert">
+                        <p class="font-bold">Résultat de l'interpolation</p>
+                        <p>Pour la date <strong>{{ interpolated_target }}</strong> (maturité de {{ interpolated_maturity }} années), le taux ZC interpolé est de <strong>{{ interpolated_rate }}%</strong>.</p>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+
+            {% else %}
+            <div class="text-center p-10 bg-white rounded-lg shadow">
+                <i class="fas fa-cloud-upload-alt fa-5x text-gray-300 mb-4"></i>
+                <h4 class="text-2xl font-bold text-gray-700">Aucune Donnée Chargée</h4>
+                <p class="text-gray-500 mt-2">Veuillez importer des données via la barre latérale pour commencer l'analyse.</p>
+            </div>
+            {% endif %}
+        </main>
+    </div>
+
+    <!-- Librairies JavaScript -->
+    <!-- jQuery -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <!-- Bootstrap JS Bundle (inclut Popper.js) -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <!-- Données pour les graphiques (à passer depuis Flask) -->
+    <script>
+        const chartData = {{ chart_data|tojson|safe }};
+    </script>
+
+    <!-- Script principal -->
+    <script>
+        document.addEventListener("DOMContentLoaded", function() {
+            const menuToggle = document.getElementById("menu-toggle");
+            const sidebar = document.getElementById("sidebar");
+
+            // Gérer l'état du menu dans localStorage
+            if (localStorage.getItem('sidebarCollapsed') === 'true') {
+                sidebar.classList.add('collapsed');
+            }
+
+            menuToggle.addEventListener("click", function() {
+                sidebar.classList.toggle("collapsed");
+                localStorage.setItem('sidebarCollapsed', sidebar.classList.contains('collapsed'));
+            });
+            
+            // Défilement fluide vers les sections
+            document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+                anchor.addEventListener('click', function (e) {
+                    e.preventDefault();
+                    const targetId = this.getAttribute('href');
+                    const targetElement = document.querySelector(targetId);
+                    if(targetElement) {
+                        targetElement.scrollIntoView({
+                            behavior: 'smooth',
+                            block: 'start'
+                        });
+                    }
+                });
+            });
+
+            // Initialisation des graphiques avec Chart.js
+            // Graphique de la courbe des taux
+            if (chartData && chartData.yield_curve) {
+                const yieldCtx = document.getElementById('yieldCurveChart').getContext('2d');
+                new Chart(yieldCtx, {
+                    type: 'line',
+                    data: {
+                        labels: chartData.yield_curve.labels,
+                        datasets: [{
+                            label: 'Taux Actuariel',
+                            data: chartData.yield_curve.actuarial_rates,
+                            borderColor: 'rgb(75, 192, 192)',
+                            tension: 0.1
+                        }, {
+                            label: 'Taux Zéro-Coupon',
+                            data: chartData.yield_curve.zc_rates,
+                            borderColor: 'rgb(255, 99, 132)',
+                            tension: 0.1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        plugins: {
+                            legend: { position: 'top' },
+                            title: { display: true, text: 'Courbe des Taux' }
+                        },
+                        scales: {
+                            x: { title: { display: true, text: 'Maturité (années)' } },
+                            y: { title: { display: true, text: 'Taux (%)' } }
+                        }
+                    }
+                });
+            }
+
+            // Graphique des taux forwards
+            if (chartData && chartData.forward_curve) {
+                const forwardCtx = document.getElementById('forwardCurveChart').getContext('2d');
+                new Chart(forwardCtx, {
+                    type: 'bar', // ou 'line'
+                    data: {
+                        labels: chartData.forward_curve.labels,
+                        datasets: [{
+                            label: 'Taux Forward',
+                            data: chartData.forward_curve.rates,
+                            backgroundColor: 'rgba(54, 162, 235, 0.6)',
+                            borderColor: 'rgb(54, 162, 235)',
+                            borderWidth: 1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        plugins: {
+                            legend: { display: false },
+                            title: { display: true, text: 'Taux Forwards' }
+                        },
+                         scales: {
+                            x: { title: { display: true, text: 'Période (années)' } },
+                            y: { title: { display: true, text: 'Taux (%)' } }
+                        }
+                    }
+                });
+            }
+        });
+    </script>
+</body>
+</html>
