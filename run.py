@@ -3,12 +3,14 @@ import pandas as pd
 import os
 import io
 from datetime import date
+from datetime import datetime
 
 from app.src.dates import get_base_date, calc_maturite
 from app.src.io_bam import import_bam_curve
 from app.src.bootstrap import taux_actuariel, bootstrap_zc
 from app.src.Forward import taux_forward
 from app.src.interpolation import interpolate_rate
+from app.src.pricing_ZC import est_k, date_fCp, pricing_bond_fixe,compare_date
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "une-cle-secrete-pour-le-developpement")
@@ -19,6 +21,7 @@ PICKLE_FILE = 'tmp_df.pkl'
 def index():
     df, df_fw = None, None
     error = None
+    prix= None
     interpolated_rate = None
     interpolated_target = None
     interpolated_maturity = None
@@ -138,6 +141,25 @@ def index():
             else:
                 error = "Date invalide ou données manquantes pour l’interpolation."
 
+        elif action == 'calculate_pricing':
+            date_em= request.form.get("date_em")
+            date_val = request.form.get("date_val")
+            date_ec = request.form.get("date_ec")
+            nominal = request.form.get("nominal", type=float)
+            taux_fac = request.form.get("taux_fac", type=float)
+            taux_act = request.form.get("taux_act", type=float)
+            date_js=request.form.get("date_js")
+            type_pay=str(request.form.get("type_pay",type=str))
+            if date_em and date_val and date_ec and nominal is not None and taux_fac is not None and taux_act is not None and date_js:
+                try:
+                    date_em = pd.to_datetime(date_em)
+                    date_val = pd.to_datetime(date_val) 
+                    date_ec = pd.to_datetime(date_ec)
+                    date_js = pd.to_datetime(date_js)
+                    prix = pricing_bond_fixe(date_em, date_val, date_ec, date_js, nominal, taux_fac, taux_act,type_pay)
+                    session['last_pricing'] = prix
+                except Exception as e:
+                    error = f"Erreur lors du calcul du pricing : {e}"
     df_display = None
     if df is not None:
         df_display = df.copy()
@@ -177,7 +199,9 @@ def index():
         interpolated_target=interpolated_target,
         interpolated_maturity=interpolated_maturity,
         kpi_stats=kpi_stats,
-        chart_data=chart_data
+        chart_data=chart_data,
+        prix=prix 
+       
     )
 if __name__ == '__main__':
     app.run(debug=True)
