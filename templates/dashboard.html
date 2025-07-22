@@ -1,297 +1,429 @@
-from flask import Flask, render_template, request, session, redirect, url_for
-import pandas as pd
-import os
-import io
-from datetime import date
-from datetime import datetime
-from dateutil.relativedelta import relativedelta
-from app.src.dates import get_base_date, calc_maturite
-from app.src.io_bam import import_bam_curve
-from app.src.bootstrap import taux_actuariel, bootstrap_zc
-from app.src.Forward import taux_forward
-from app.src.interpolation import interpolate_rate
-from app.src.pricing_ZC import est_k, date_fCp, pricing_bond_fixe,compare_date
-
-app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "une-cle-secrete-pour-le-developpement")
-
-PICKLE_FILE = 'tmp_df.pkl'
-
-@app.route('/', methods=['GET', 'POST'])
-def index():
-    df, df_fw = None, None
-    prix_act=None
-    error = None
-    prix= None
-    Ccu=None
-    interpolated_rate = None
-    interpolated_target = None
-    interpolated_maturity = None
-    kpi_stats = {}
-    chart_data = {}
-     
-
-  
-    def perform_calculations(df_input):
-        df_input.rename(columns={
-            "Date échéance": "Echeance", "Date d'échéance": "Echeance",
-            "Taux moyen": "Taux moyen pondéré"
-        }, inplace=True, errors='ignore')
-
-        if "Echeance" not in df_input.columns or "Taux moyen pondéré" not in df_input.columns:
-            raise ValueError("Colonnes 'Echeance' et/ou 'Taux moyen pondéré' introuvables.")
-
-        date_base = get_base_date(df_input, col_name="Echeance")
-        df_input["maturite_jours"] = df_input["Echeance"].apply(lambda s: calc_maturite(s, date_base))
-        df_input.dropna(subset=["maturite_jours"], inplace=True)
-        df_input["maturite_annees"] = df_input["maturite_jours"].astype(float) / 365.25
-        df_input["Taux_decimal"] = df_input["Taux moyen pondéré"].astype(str).str.replace('%', '').str.replace(',', '.').astype(float) / 100
-        df_input.sort_values(by="maturite_annees", inplace=True)
-        df_input["Taux_actuariel"] = df_input.apply(lambda r: taux_actuariel(r["maturite_annees"], r["Taux_decimal"]), axis=1)
-        df_input["Taux_zero_coupon"] = bootstrap_zc(df_input)
-        return df_input
-    def PRICING_FIX_BOND_ZC(date_em, date_val, date_ec, date_js, nominal, taux_fac, type_pay):
-                      RATE=0
-                      prix=0
-                      Ccu=0
-                      ##data science il faut lier les coube importer au taux actuariel
-                      ##importer une deuxieme fois dans le backend{date_val},recuperer la base input qui contient les zero coupon
-                      ##puis interpoler les taux zero coupons pour lzs dates des echeances
-                      #recuperer la base de donnes :
-                      data = import_bam_curve(date_val)
-                      df = perform_calculations(data)
-                      date_base =df["Echeance"].iloc[0]
-                      date_base = datetime.strptime(date_base, "%d/%m/%Y")
-                      #recuperer la date du premier flux :
-                      date_flux = date_fCp(date_js, date_val, type_pay)
-                      #interpoler le tauxZC pour la date du premier flux :
-                      RATE=interpolate_rate(df["maturite_annees"], df["Taux_zero_coupon"], date_flux.year - date_base.year)
-                      Ccu=nominal*RATE*(date_flux-date_val).days/(date_ec-date_val).days
-                      while date_flux <= date_ec:
-                        k=est_k(date_flux.year)
-                        M=(date_flux-date_val).days/k
-                        RATE=interpolate_rate(df["maturite_annees"], df["Taux_zero_coupon"], date_flux.year - date_base.year)
-                        prix=prix+(nominal*taux_fac)/(1+RATE)**(M)
-                        if date_flux.year==date_ec.year:
-                          prix=prix+((nominal)/(1+RATE)**(M))
-                        date_flux = datetime(date_flux.year+1, date_em.month, date_em.day)               
-                      return prix,Ccu
-    ## pricing d'une obligation a taux variable :
-    def PRICING_CHANGING_RATE_BOND(date_em, date_val, date_ec, date_js, nominal, EURIBOR, Spread, type_pay):
-                      RATE=0
-                      prix=0
-                      taux_var=EURIBOR
-                      ##data science il faut lier les coube importer au taux actuariel
-                      ##importer une deuxieme fois dans le backend{date_val},recuperer la base input qui contient les zero coupon
-                      ##puis interpoler les taux zero coupons pour lzs dates des echeances
-                      #recuperer la base de donnes :
-                      data = import_bam_curve(date_val)
-                      df = perform_calculations(data)
-                      date_base = df["Echeance"].iloc[0]
-                      date_base = datetime.strptime(date_base, "%d/%m/%Y")
-                      #interpoler le tauxZC pour la date du premier flux 
-
-                      #recuperer la date du premier flux :
-                      date_flux = date_fCp(date_js, date_val, type_pay)
-
-                        #boucle pour le calcul du prix :
-                      while date_flux <= date_ec:
-                        k=est_k(date_flux.year)
-                        M=(date_flux-date_val).days/k
-                        RATE=interpolate_rate(df["maturite_annees"], df["Taux_zero_coupon"], date_flux.year - date_base.year)
-                        prix=prix+(nominal*taux_var)/(1+RATE)**(M)
-                        if date_flux.year==date_ec.year:
-                          prix=prix+((nominal)/(1+RATE)**(M))
-                        taux_var+=Spread
-                        date_flux = datetime(date_flux.year+1, date_em.month, date_em.day)
-
-                      return prix
-
-
-    if request.method == 'GET' and not session.get('has_data'):
-        try:
-            today_str = date.today().isoformat()
-            df = import_bam_curve(date.today())
-            df = perform_calculations(df)
-            df.to_pickle(PICKLE_FILE)
-            session['has_data'] = True
-            session['last_mode'] = 'bam'
-            session['last_date'] = today_str
-        except Exception as e:
-            error = f"Erreur lors du chargement automatique des données BAM : {e}"
-            session.clear()
-
-    if session.get('has_data') and os.path.exists(PICKLE_FILE):
-        try:
-            df = pd.read_pickle(PICKLE_FILE)
-        except (FileNotFoundError, EOFError):
-            session.clear()
-            error = "Erreur de chargement des données de session. Veuillez recharger les données."
-
-    if request.method == 'POST':
-        action = request.form.get('action')
-
-        if action == 'reset':
-            session.clear()
-            if os.path.exists(PICKLE_FILE):
-                os.remove(PICKLE_FILE)
-            return redirect(url_for('index'))
-
-        elif action == 'calculate_curves':
-            mode = request.form.get('mode')
-            raw_df = None
-            try:
-                if mode == "bam":
-                    date_str = request.form.get("date_bam")
-                    date_pub = pd.to_datetime(date_str).date() if date_str else date.today()
-                    raw_df = import_bam_curve(date_pub)
-                    session['last_mode'] = 'bam'
-                    session['last_date'] = date_str
-                elif mode == "upload":
-                    file = request.files.get('csv')
-                    if file and file.filename:
-                        csv_data = io.StringIO(file.stream.read().decode("UTF-8"))
-                        raw_df = pd.read_csv(csv_data, sep=';', skiprows=2, skipfooter=1, engine='python', dtype=str)
-                        session['last_mode'] = 'upload'
-                        session['last_filename'] = file.filename
-                    else:
-                        error = "Aucun fichier CSV sélectionné."
-
-                if raw_df is not None:
-                    df = perform_calculations(raw_df)
-                    df.to_pickle(PICKLE_FILE)
-                    session['has_data'] = True
-                elif not error:
-                    error = "Aucune donnée n'a été importée."
-            except Exception as e:
-                error = f"Erreur lors du calcul des taux : {e}"
-                session.clear()
-        
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard - Analyse de Taux</title>
     
-        elif action == 'pricing_changing_rate_bond':
-            dt_em = request.form.get('dt_em')
-            dt_val = request.form.get('dt_val')
-            dt_ec = request.form.get('dt_ec')
-            dt_js = request.form.get('dt_js')
-            nominal = request.form.get('nominal', type=float)
-            EURIBOR = request.form.get('EURIBOR', type=float)
-            Spread = request.form.get('Spread', type=float)
-            payement = str(request.form.get('payement', type=str))
-            if dt_em and dt_val and dt_ec and nominal is not None and EURIBOR is not None and Spread is not None and dt_js:
-                try:
-                    dt_em = pd.to_datetime(dt_em)
-                    dt_val = pd.to_datetime(dt_val)
-                    dt_ec = pd.to_datetime(dt_ec)
-                    dt_js = pd.to_datetime(dt_js)
-                    prix_var = PRICING_CHANGING_RATE_BOND(dt_em, dt_val, dt_ec, dt_js, nominal, EURIBOR, Spread, payement )
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Font Awesome (for icons) -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+    
+    <!-- Google Fonts: Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 
-                except Exception as e:
-                    error = f"Erreur lors du calcul du pricing à taux variable : {e}"
-
-        elif action == 'calculate_forwards':
-            if df is not None and 'Taux_zero_coupon' in df.columns:
-                if len(df) > 1:
-                    mats = df["maturite_annees"].to_numpy()
-                    zc = df["Taux_zero_coupon"].to_numpy()
-                    mats_start, mats_end, forwards = taux_forward(mats, zc)
-                    df_fw = pd.DataFrame({
-                        "De (années)": [f"{x:.2f}" for x in mats_start],
-                        "À (années)": [f"{x:.2f}" for x in mats_end],
-                        "Taux Forward (%)": [f"{x*100:.2f}" for x in forwards]
-                    })
-                else:
-                    error = "Données insuffisantes pour calculer les taux forwards."
-            else:
-                error = "Veuillez d'abord importer et calculer les courbes de base."
-
-        elif action == 'interpolate_date':
-            date_str = request.form.get("target_date")
-            if df is not None and 'Taux_zero_coupon' in df.columns and date_str:
-                try:
-                    date_cible = pd.to_datetime(date_str).date()
-                    base_date = get_base_date(df)
-                    jours = calc_maturite(date_cible.isoformat(), base_date)
-                    maturity = jours / 365.25
-                    mats = df["maturite_annees"].to_numpy()
-                    zc = df["Taux_zero_coupon"].to_numpy()
-                    interpolated = interpolate_rate(mats, zc, maturity)
-                    interpolated_rate = f"{interpolated * 100:.4f}"
-                    interpolated_target = date_cible.strftime("%d/%m/%Y")
-                    interpolated_maturity = f"{maturity:.2f}"
-                except Exception as e:
-                    error = f"Erreur lors de l'interpolation : {e}"
-            else:
-                error = "Date invalide ou données manquantes pour l’interpolation."
-
-        elif action == 'Pricing_Bond':
-            date_em= request.form.get("date_em")
-            date_val = request.form.get("date_val")
-            date_ec = request.form.get("date_ec")
-            nominal = request.form.get("nominal", type=float)
-            taux_fac = request.form.get("taux_fac", type=float)
-            taux_act= request.form.get("taux_act", type=float)
-            date_js=request.form.get("date_js")
-            type_pay=str(request.form.get("type_pay",type=str))
-            if date_em and date_val and date_ec and nominal is not None and taux_fac is not None and date_js:
-                try:
-                    date_em = pd.to_datetime(date_em)
-                    date_val = pd.to_datetime(date_val) 
-                    date_ec = pd.to_datetime(date_ec)
-                    date_js = pd.to_datetime(date_js)
-                    prix = PRICING_FIX_BOND_ZC(date_em, date_val, date_ec, date_js, nominal, taux_fac,type_pay)[0]
-                    Ccu=PRICING_FIX_BOND_ZC(date_em, date_val, date_ec, date_js, nominal, taux_fac,type_pay)[1]
-                    prix_act= pricing_bond_fixe(date_em, date_val, date_ec, date_js, nominal, taux_fac ,taux_act ,type_pay)[1]
-                    session['last_pricing'] = prix
-
-                except Exception as e:
-                    error = f"Erreur lors du calcul du pricing : {e}"
-        
-        
-    df_display = None
-    if df is not None:
-        df_display = df.copy()
-        for col in ['Taux_decimal', 'Taux_actuariel', 'Taux_zero_coupon']:
-            if col in df_display.columns:
-                df_display[col] = df_display[col].apply(lambda x: f"{x*100:.4f}%")
-        if 'maturite_annees' in df_display.columns:
-            df_display['maturite_annees'] = df_display['maturite_annees'].apply(lambda x: f"{x:.2f}")
-
-        if not df.empty:
-            kpi_stats = {
-                'nb_echeances': len(df),
-                'taux_zc_max': f"{df['Taux_zero_coupon'].max()*100:.2f}%",
-                'maturite_max': f"{df['maturite_annees'].max():.2f} ans"
-            }
-
-            chart_data["yield_curve"] = {
-                "labels": df["maturite_annees"].round(2).tolist(),
-                "actuarial_rates": (df["Taux_actuariel"] * 100).round(2).tolist(),
-                "zc_rates": (df["Taux_zero_coupon"] * 100).round(2).tolist()
-            }
-
-    if df_fw is not None and not df_fw.empty:
-        chart_data["forward_curve"] = {
-            "labels": df_fw["À (années)"].tolist(),
-            "rates": [float(val.replace(",", ".")) for val in df_fw["Taux Forward (%)"]]
+    <style>
+        /* Custom styles to complement Tailwind */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f8f9fc; /* Light gray background */
         }
 
-    return render_template(
-        "dashboard.html",
-        df_table=df_display.to_html(classes='table', index=False) if df_display is not None else None,
-        df_fw_table=df_fw.to_html(classes='table', index=False) if df_fw is not None else None,
-        error=error,
-        has_data=session.get('has_data', False),
-        last_date=session.get('last_date', date.today().isoformat()),
-        interpolated_rate=interpolated_rate,
-        interpolated_target=interpolated_target,
-        interpolated_maturity=interpolated_maturity,
-        kpi_stats=kpi_stats,
-        chart_data=chart_data,
-        prix=prix,
-        prix_act=prix_act,
-        Ccu=Ccu,
-      
-    )
-if __name__ == '__main__':
-    app.run(debug=True)
+        #sidebar {
+            width: 250px;
+            min-height: 100vh;
+            transition: margin-left 0.3s ease-in-out;
+        }
 
+        #sidebar.collapsed {
+            margin-left: -250px;
+        }
+        
+        /* KPI card styles */
+        .kpi-card {
+            border-left-width: 4px;
+            transition: all 0.2s ease-in-out;
+        }
+        .kpi-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.1);
+        }
+        .border-left-primary { border-color: #4e73df; }
+        .border-left-success { border-color: #1cc88a; }
+        .border-left-warning { border-color: #f6c23e; }
+
+        /* Card header styles */
+        .card-header-custom {
+            background-color: #f8f9fc;
+            border-bottom: 1px solid #e3e6f0;
+        }
+        
+        /* Styles for Pandas-generated tables */
+        .table {
+            width: 100%;
+            margin-bottom: 1rem;
+            color: #5a5c69;
+            border-collapse: collapse;
+        }
+        .table th, .table td {
+            padding: 0.75rem;
+            vertical-align: top;
+            border-top: 1px solid #e3e6f0;
+        }
+        .table thead th {
+            vertical-align: bottom;
+            border-bottom: 2px solid #e3e6f0;
+            background-color: #f8f9fc;
+            font-weight: 600;
+        }
+        .table tbody tr:nth-of-type(odd) {
+            background-color: rgba(0, 0, 0, 0.02);
+        }
+        .table tbody tr:hover {
+            background-color: #e9ecef;
+        }
+        .scroll-mt-20 {
+            scroll-margin-top: 5rem;
+        }
+    </style>
+</head>
+<body class="flex">
+
+    <!-- Sidebar -->
+    <aside id="sidebar" class="bg-gray-900 text-white flex-shrink-0">
+        <div class="p-4 text-2xl font-bold border-b border-gray-700">
+            <a href="/"><i class="fas fa-chart-line text-blue-400"></i> AWB Finance</a>
+        </div>
+        <nav class="mt-4">
+            <h3 class="px-4 py-2 text-xs uppercase text-gray-400 font-bold">Actions</h3>
+            <!-- Import Form -->
+            <div class="px-4 py-2">
+                <form action="{{ url_for('index') }}" method="post" enctype="multipart/form-data">
+                    <input type="hidden" name="action" value="calculate_curves">
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-300 mb-1">Source BAM</label>
+                        <input type="date" name="date_bam" class="w-full bg-gray-700 border border-gray-600 rounded-md p-2 text-sm focus:ring-blue-500 focus:border-blue-500" value="{{ last_date }}">
+                        <button type="submit" name="mode" value="bam" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md mt-2 text-sm transition">
+                            <i class="fas fa-download mr-2"></i>Charger
+                        </button>
+                    </div>
+                    <div>
+                        <label for="csvFile" class="block text-sm font-medium text-gray-300 mb-1">Fichier CSV</label>
+                        <input class="w-full text-sm text-gray-300 bg-gray-700 border border-gray-600 rounded-md cursor-pointer file:bg-gray-600 file:border-0 file:text-white file:font-bold file:py-2 file:px-4" type="file" name="csv" id="csvFile">
+                        <button type="submit" name="mode" value="upload" class="w-full bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-md mt-2 text-sm transition">
+                            <i class="fas fa-upload mr-2"></i>Uploader
+                        </button>
+                    </div>
+                </form>
+            </div>
+            
+            <h3 class="px-4 py-2 mt-4 text-xs uppercase text-gray-400 font-bold">Navigation</h3>
+            <a href="#courbes-section" class="block px-4 py-2 text-gray-300 hover:bg-gray-700 hover:text-white rounded-md mx-2 transition">
+                <i class="fas fa-bezier-curve fa-fw mr-3"></i>Courbes de Taux
+            </a>
+            <a href="#forwards-section" class="block px-4 py-2 text-gray-300 hover:bg-gray-700 hover:text-white rounded-md mx-2 transition">
+                <i class="fas fa-chart-area fa-fw mr-3"></i>Taux Forwards
+            </a>
+            <a href="#interpolation-section" class="block px-4 py-2 text-gray-300 hover:bg-gray-700 hover:text-white rounded-md mx-2 transition">
+                <i class="fas fa-chart-pie fa-fw mr-3"></i>Interpolation
+            </a>
+            <a href="#pricing-section" class="block px-4 py-2 text-gray-300 hover:bg-gray-700 hover:text-white rounded-md mx-2 transition">
+                <i class="fas fa-calculator fa-fw mr-3"></i>Pricing Obligation
+            </a>
+        </nav>
+    </aside>
+
+    <!-- Main Content -->
+    <div class="flex-1 flex flex-col">
+        <!-- Header -->
+        <header class="bg-white shadow-sm p-4 flex justify-between items-center sticky top-0 z-10">
+            <button id="menu-toggle" class="text-gray-600 hover:text-gray-900 focus:outline-none">
+                <i class="fas fa-bars text-xl"></i>
+            </button>
+            <form action="{{ url_for('index') }}" method="post">
+                <input type="hidden" name="action" value="reset">
+                <button type="submit" class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded-md text-sm transition">
+                    <i class="fas fa-power-off mr-2"></i>Réinitialiser
+                </button>
+            </form>
+        </header>
+
+        <!-- Page Content -->
+        <main class="flex-1 p-6 overflow-y-auto">
+            <h1 class="text-3xl font-bold text-gray-800 mb-6">Dashboard</h1>
+
+            <!-- Error Messages Block -->
+            {% if error %}
+            <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md relative mb-6" role="alert">
+                <strong class="font-bold">Erreur : </strong>
+                <span class="block sm:inline">{{ error }}</span>
+            </div>
+            {% endif %}
+
+            {% if has_data %}
+            <!-- KPI Cards -->
+            <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6 mb-6">
+                <div class="kpi-card bg-white rounded-lg shadow p-4 border-left-primary">
+                    <div class="flex items-center">
+                        <div class="flex-1">
+                            <div class="text-xs font-bold text-blue-600 uppercase mb-1">Échéances</div>
+                            <div class="text-2xl font-bold text-gray-800">{{ kpi_stats.nb_echeances }}</div>
+                        </div>
+                        <div class="text-gray-300"><i class="fas fa-calendar fa-3x"></i></div>
+                    </div>
+                </div>
+                <div class="kpi-card bg-white rounded-lg shadow p-4 border-left-success">
+                    <div class="flex items-center">
+                        <div class="flex-1">
+                            <div class="text-xs font-bold text-green-600 uppercase mb-1">Maturité Max</div>
+                            <div class="text-2xl font-bold text-gray-800">{{ kpi_stats.maturite_max }}</div>
+                        </div>
+                        <div class="text-gray-300"><i class="fas fa-clock fa-3x"></i></div>
+                    </div>
+                </div>
+                <div class="kpi-card bg-white rounded-lg shadow p-4 border-left-warning">
+                     <div class="flex items-center">
+                        <div class="flex-1">
+                            <div class="text-xs font-bold text-yellow-600 uppercase mb-1">Taux ZC Max</div>
+                            <div class="text-2xl font-bold text-gray-800">{{ kpi_stats.taux_zc_max }}</div>
+                        </div>
+                        <div class="text-gray-300"><i class="fas fa-arrow-up-right-dots fa-3x"></i></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Curves Section -->
+            <div id="courbes-section" class="bg-white rounded-lg shadow mb-6 scroll-mt-20">
+                <div class="card-header-custom p-4 rounded-t-lg">
+                    <h6 class="text-lg font-bold text-blue-600">Courbes de Taux (Actuariel & Zéro-Coupon)</h6>
+                </div>
+                <div class="p-4">
+                    <canvas id="yieldCurveChart"></canvas>
+                    <hr class="my-4">
+                    <h6 class="text-md font-semibold text-gray-700 mb-2">Données de calcul</h6>
+                    <div class="overflow-x-auto">
+                        {% if df_table %}{{ df_table|safe }}{% else %}<p class="text-gray-500">Aucune donnée.</p>{% endif %}
+                    </div>
+                </div>
+            </div>
+
+            <!-- Forwards Section -->
+            <div id="forwards-section" class="bg-white rounded-lg shadow mb-6 scroll-mt-20">
+                <div class="card-header-custom p-4 flex justify-between items-center rounded-t-lg">
+                    <h6 class="text-lg font-bold text-blue-600">Calcul des Taux Forwards</h6>
+                    <form action="{{ url_for('index') }}" method="post">
+                        <input type="hidden" name="action" value="calculate_forwards">
+                        <button type="submit" class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-md text-sm transition">Calculer</button>
+                    </form>
+                </div>
+                <div class="p-4">
+                    <canvas id="forwardCurveChart"></canvas>
+                    {% if df_fw_table %}
+                        <hr class="my-4">
+                        <h6 class="text-md font-semibold text-gray-700 mb-2">Détails des Taux Forwards</h6>
+                        <div class="overflow-x-auto">{{ df_fw_table|safe }}</div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Interpolation Section -->
+            <div id="interpolation-section" class="bg-white rounded-lg shadow mb-6 scroll-mt-20">
+                <div class="card-header-custom p-4 rounded-t-lg">
+                    <h6 class="text-lg font-bold text-blue-600">Interpolation de Taux Zéro-Coupon</h6>
+                </div>
+                <div class="p-4">
+                     <form action="{{ url_for('index') }}" method="post" class="flex items-end gap-4">
+                        <input type="hidden" name="action" value="interpolate_date">
+                        <div class="flex-1">
+                            <label for="target_date" class="block text-sm font-medium text-gray-700">Date à interpoler</label>
+                            <input type="date" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50" id="target_date" name="target_date" required>
+                        </div>
+                        <button type="submit" class="bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-2 px-4 rounded-md text-sm transition">Interpoler</button>
+                    </form>
+                    {% if interpolated_rate %}
+                    <div class="bg-indigo-100 border-l-4 border-indigo-500 text-indigo-700 p-4 mt-6 rounded-md" role="alert">
+                        <p class="font-bold">Résultat de l'interpolation</p>
+                        <p>Pour la date <strong>{{ interpolated_target }}</strong> (maturité de {{ interpolated_maturity }} années), le taux ZC interpolé est de <strong>{{ interpolated_rate }}%</strong>.</p>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            
+            <!-- Bond Pricing Section -->
+            <div id="pricing-section" class="bg-white rounded-lg shadow mb-6 scroll-mt-20">
+                <div class="card-header-custom p-4 rounded-t-lg">
+                    <h6 class="text-lg font-bold text-blue-600">Pricing d'Obligation à Taux Fixe</h6>
+                </div>
+                <div class="p-4">
+                    <p class="text-sm text-gray-500 mb-4">Ce formulaire utilise la logique de pricing avec un taux actuariel unique et des coupons annuels.</p>
+                    <form method="POST" action="{{ url_for('index') }}">
+                        <input type="hidden" name="action" value="Pricing_Bond">
+                        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                            <div>
+                                <label for="date_val" class="block text-sm font-medium text-gray-700">Date de valorisation</label>
+                                <input type="date" id="date_val" name="date_val" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm" required>
+                            </div>
+                            <div>
+                                <label for="date_em" class="block text-sm font-medium text-gray-700">Date d'émission</label>
+                                <input type="date" id="date_em" name="date_em" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm" required>
+                            </div>
+                            <div>
+                                <label for="date_js" class="block text-sm font-medium text-gray-700">Date de Jouissance</label>
+                                <input type="date" id="date_js" name="date_js" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm" required>
+                            </div>
+                            <div>
+                                <label for="date_ec" class="block text-sm font-medium text-gray-700">Date d'échéance</label>
+                                <input type="date" id="date_ec" name="date_ec" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm" required>
+                            </div>
+                            <div>
+                                <label for="taux_fac" class="block text-sm font-medium text-gray-700">Taux facial (ex: 0.03)</label>
+                                <input type="number" step="0.0001" id="taux_fac" name="taux_fac" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm" value="0.03" required>
+                            </div>
+                            <div>
+                                <label for="taux_act" class="block text-sm font-medium text-gray-700">Taux actuariel (ex: 0.03)</label>
+                                <input type="number" step="0.0001" id="taux_act" name="taux_act" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm" value="0.03" required>
+                            </div>
+                            <div>
+                                <label for="nominal" class="block text-sm font-medium text-gray-700">Nominal</label>
+                                <input type="number" step="any" id="nominal" name="nominal" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm" value="1000" required>
+                            </div>
+                            <!-- ADDED: Payment Type Field -->
+                            <div>
+                                <label for="type_pay" class="block text-sm font-medium text-gray-700">Type de Paiement</label>
+                                <select id="type_pay" name="type_pay" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm" required>
+                                    <option value="a">Annuel</option>
+                                    <option value="t">trimestriel</option>
+                                    <option value="m">Mensuel</option>
+                                </select>
+                            </div>
+                        </div>
+                        <button type="submit" class="mt-4 bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-md text-sm transition">
+                            <i class="fas fa-cogs mr-2"></i>Calculer le Prix
+                        </button>
+                    </form>
+
+                    <!-- CORRECTED: Display pricing result -->
+                    {% if prix is not none %}
+                    <div class="bg-green-100 border-l-4 border-green-500 text-green-700 p-4 mt-6 rounded-md" role="alert">
+                        <p class="font-bold">Résultat du Pricing</p>
+                        <p>Le prix calculé de l'obligation ZC est de : <strong>{{ "%.4f"|format(prix) }}</strong></p>
+                    </div>
+                    {% endif %}
+                                        {% if prix_act is not none %}
+                    <div class="bg-green-100 border-l-4 border-green-500 text-green-700 p-4 mt-6 rounded-md" role="alert">
+                        <p class="font-bold">Résultat du Pricing</p>
+                        <p>Le prix calculé de l'obligation avec YTMest de : <strong>{{ "%.4f"|format(prix_act) }}</strong></p>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+
+            {% else %}
+            <div class="text-center p-10 bg-white rounded-lg shadow">
+                <i class="fas fa-cloud-upload-alt fa-5x text-gray-300 mb-4"></i>
+                <h4 class="text-2xl font-bold text-gray-700">Aucune Donnée Chargée</h4>
+                <p class="text-gray-500 mt-2">Veuillez importer des données via la barre latérale pour commencer l'analyse.</p>
+            </div>
+            {% endif %}
+        </main>
+    </div>
+
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <!-- Data for charts (passed from Flask) -->
+    <script>
+        const chartData = {{ chart_data|tojson|safe }};
+    </script>
+
+    <!-- Main Script -->
+    <script>
+        document.addEventListener("DOMContentLoaded", function() {
+            const menuToggle = document.getElementById("menu-toggle");
+            const sidebar = document.getElementById("sidebar");
+
+            // Manage menu state in localStorage
+            if (localStorage.getItem('sidebarCollapsed') === 'true') {
+                sidebar.classList.add('collapsed');
+            }
+
+            menuToggle.addEventListener("click", function() {
+                sidebar.classList.toggle("collapsed");
+                localStorage.setItem('sidebarCollapsed', sidebar.classList.contains('collapsed'));
+            });
+            
+            // Smooth scroll to sections
+            document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+                anchor.addEventListener('click', function (e) {
+                    e.preventDefault();
+                    const targetId = this.getAttribute('href');
+                    const targetElement = document.querySelector(targetId);
+                    if(targetElement) {
+                        targetElement.scrollIntoView({
+                            behavior: 'smooth',
+                            block: 'start'
+                        });
+                    }
+                });
+            });
+            
+            // Initialize charts with Chart.js
+            // Yield Curve Chart
+            if (chartData && chartData.yield_curve) {
+                const yieldCtx = document.getElementById('yieldCurveChart').getContext('2d');
+                new Chart(yieldCtx, {
+                    type: 'line',
+                    data: {
+                        labels: chartData.yield_curve.labels,
+                        datasets: [{
+                            label: 'Taux Actuariel',
+                            data: chartData.yield_curve.actuarial_rates,
+                            borderColor: 'rgb(75, 192, 192)',
+                            tension: 0.1
+                        }, {
+                            label: 'Taux Zéro-Coupon',
+                            data: chartData.yield_curve.zc_rates,
+                            borderColor: 'rgb(255, 99, 132)',
+                            tension: 0.1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        plugins: {
+                            legend: { position: 'top' },
+                            title: { display: false }
+                        },
+                        scales: {
+                            x: { title: { display: true, text: 'Maturité (années)' } },
+                            y: { title: { display: true, text: 'Taux (%)' } }
+                        }
+                    }
+                });
+            }
+
+            // Forward Rates Chart
+            if (chartData && chartData.forward_curve) {
+                const forwardCtx = document.getElementById('forwardCurveChart').getContext('2d');
+                new Chart(forwardCtx, {
+                    type: 'bar',
+                    data: {
+                        labels: chartData.forward_curve.labels,
+                        datasets: [{
+                            label: 'Taux Forward',
+                            data: chartData.forward_curve.rates,
+                            backgroundColor: 'rgba(54, 162, 235, 0.6)',
+                            borderColor: 'rgb(54, 162, 235)',
+                            borderWidth: 1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        plugins: {
+                            legend: { display: false },
+                            title: { display: false }
+                        },
+                         scales: {
+                            x: { title: { display: true, text: 'Période (années)' } },
+                            y: { title: { display: true, text: 'Taux (%)' } }
+                        }
+                    }
+                });
+            }
+        });
+    </script>
+</body>
+</html>
