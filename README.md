@@ -12,6 +12,7 @@ Ce projet est un **dashboard interactif** pour l'analyse et le calcul des **taux
 - 🧩 Interpolation personnalisée d’échéance
 - 🧑‍💻 Interface web professionnelle (Flask)
 - 🐳 Dockerisation pour déploiement simple
+- 👉Pricing des obligations avec les taux actuariels et Zero Coupon 
 
 ## 📂 Structure du projet
 
@@ -34,6 +35,7 @@ yield-curve-analyzer/
        ├── bootstrap.py           # Calcul des taux actuariels et ZC
        ├── interpolation.py       # Interpolation spline/linéaire
        └── forward.py             # Calculs des taux forwards
+       └── Pricing.py             # Pricing des obligations
 ```
 
 ## 📈 Exemple de visualisation :
@@ -43,6 +45,10 @@ Voici un aperçu du dashboard :
 <img width="954" height="353" alt="image" src="https://github.com/user-attachments/assets/4e2d3dd8-3087-4332-8c97-f28f357fdcef" />
 <img width="959" height="437" alt="image" src="https://github.com/user-attachments/assets/3862a5ba-90cf-4e23-9639-9f1b212f5bbb" />
 <img width="953" height="161" alt="image" src="https://github.com/user-attachments/assets/09c57783-2b94-445f-97e0-541e18f1f9cf" />
+<img width="959" height="175" alt="image" src="https://github.com/user-attachments/assets/c4d7518a-bcea-44cf-868b-b7c64a06c2a6" />
+<img width="948" height="125" alt="image" src="https://github.com/user-attachments/assets/767fb933-798d-4768-972f-91d535d28aa8" />
+
+
 
 
 
