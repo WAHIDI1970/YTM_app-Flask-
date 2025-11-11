@@ -1,4 +1,4 @@
-# 📈 Yield Curve Analyzer – BAM Curve Dashboard
+# 📈 Bond's Pricer– BAM Curve Dashboard
 
 Ce projet est un **dashboard interactif** pour l'analyse et le calcul des **taux actuariels**, **taux zéro coupon**, et **taux forward** à partir des courbes de taux publiées par la **Banque Al-Maghrib (BAM)**. Il est conçu pour les analystes financiers, ingénieurs quantitatifs, chercheurs ou toute personne intéressée par la modélisation des courbes de taux.
 
